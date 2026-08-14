@@ -1,42 +1,93 @@
 # PlayBridge Headless Receiver
 
-A small downstream patch for the PlayBridge CLI that exposes its existing receiver runtime without starting the Ratatui dashboard.
+[![Status](https://img.shields.io/badge/status-experimental-orange)](https://github.com/LogicLethargic/playbridge-headless)
+[![Platform](https://img.shields.io/badge/platform-Linux-informational)](https://github.com/LogicLethargic/playbridge-headless)
+[![Implementation](https://img.shields.io/badge/implementation-downstream%20patch-blue)](https://github.com/LogicLethargic/playbridge-headless)
 
-## Why this exists
+A focused downstream engineering project around **PlayBridge CLI 0.2.0**: exposing the existing receiver runtime without launching the interactive Ratatui dashboard.
 
-PlayBridge CLI 0.2.0 made the full-screen dashboard the primary interface, including receiver mode. The receiver implementation itself already has a non-dashboard execution path: `run_receiver_mode(..., None)` starts the receiver host, handles pairing and playback commands, launches mpv, and exits cleanly on Ctrl+C. The CLI simply does not expose that path as a command.
+This repository is intentionally **not a replacement media receiver** and does not reimplement PlayBridge's protocol. It demonstrates a smaller, more maintainable approach: inspect the existing execution path, identify the UI boundary, make the smallest possible change, and build the result reproducibly against upstream.
 
-This project adds one explicit flag:
+## The problem
+
+The stock `playbridge receiver` command enters the full-screen dashboard. On the Fedora 43 test system used for this investigation, the receiver process could consume roughly one CPU core while otherwise idle.
+
+A syscall trace showed the dashboard repeatedly:
+
+- writing terminal escape sequences;
+- opening `/dev/tty`;
+- querying terminal dimensions with `TIOCGWINSZ`;
+- closing the terminal descriptor;
+- repeating the cycle at high frequency.
+
+The important finding was that the receiver runtime itself already accepted an optional dashboard channel. The dashboard was an orchestration/UI layer rather than the receiver's fundamental runtime dependency.
+
+## Approach
+
+Instead of hiding the dashboard behind `nohup`, a pseudo-terminal, or a terminal emulator, the patch adds an explicit execution path:
 
 ```text
 playbridge receiver --headless
+             │
+             ├── parse receiver arguments
+             │
+             ├── run_receiver_mode(arguments, None)
+             │
+             └── existing receiver runtime
+                    ├── WSS receiver host
+                    ├── pairing / control handling
+                    ├── queue handling
+                    └── mpv playback
 ```
 
-The normal `playbridge receiver` behavior is unchanged.
+The normal `playbridge receiver` path remains dashboard-driven.
 
-## What it changes
+## What changed
 
-- Adds `--headless` to the `receiver` command.
-- Routes directly to the existing receiver runtime instead of the dashboard.
-- Keeps PlayBridge discovery, WSS receiver hosting, pairing, queue handling, and mpv playback in the upstream implementation.
-- Keeps Ctrl+C shutdown behavior from the existing receiver runtime.
-- Does **not** attempt to reverse-engineer or replace the PlayBridge protocol.
+The downstream patch makes two deliberately small source changes:
+
+1. Add `--headless` handling to the receiver command in `cli/src/main.rs`.
+2. Expose the already-existing `run_receiver_mode` function to the command dispatcher in `cli/src/receive.rs`.
+
+The actual receiver implementation is left upstream-owned. The patch does not copy or replace it.
+
+## Repository layout
+
+```text
+.
+├── patches/
+│   └── headless-receiver.patch     # minimal upstream source patch
+├── scripts/
+│   ├── build.sh                    # reproducible downstream build
+│   └── verify.sh                   # static patch/repository checks
+├── systemd/
+│   └── playbridge-headless.service # user-service example
+├── CONTRIBUTING.md
+├── ENGINEERING.md                  # investigation and design notes
+└── README.md
+```
 
 ## Build
 
-The patch is intentionally kept separate from the upstream source tree. `scripts/build.sh` clones the upstream PlayBridge repository, checks out the requested revision, applies the patch, and builds the CLI.
+Requirements:
+
+- Git
+- Rust/Cargo
+- a working PlayBridge upstream checkout/build environment
+
+Build from a clean upstream checkout:
 
 ```bash
 ./scripts/build.sh
 ```
 
-By default it builds against the PlayBridge `main` branch. To pin a revision:
+Pin the upstream revision when reproducibility matters:
 
 ```bash
-PLAYBRIDGE_REF=be8cae4aecac8e65d3c15bdade11f9b7771df2b7 ./scripts/build.sh
+PLAYBRIDGE_REF=<commit-or-ref> ./scripts/build.sh
 ```
 
-The resulting binary is written to `dist/playbridge`.
+The binary is produced at `dist/playbridge`.
 
 ## Run
 
@@ -50,22 +101,44 @@ Optional receiver settings remain available:
 ./dist/playbridge receiver --headless --name "NetRunner15" --port 8765
 ```
 
-The receiver prints its listening port and pairing events to stdout/stderr instead of rendering a dashboard.
+The headless route is intended to keep the receiver runtime attached to normal process I/O rather than rendering a full-screen terminal interface.
+
+## Verify the patch
+
+Run the repository checks before attempting a build:
+
+```bash
+./scripts/verify.sh
+```
+
+The verifier checks repository invariants and inspects the patch for the intended command/runtime boundary. It deliberately does not pretend to be a substitute for compiling against the selected upstream revision.
 
 ## systemd
 
-An example user service is provided in `systemd/playbridge-headless.service`. Edit the `ExecStart` path for your installation, then enable it with your normal user-systemd workflow.
+`systemd/playbridge-headless.service` is an example **user** service. It is deliberately not hard-coded to a particular home directory or binary location; edit `ExecStart` for the local installation before enabling it.
 
-## Current investigation
+## Engineering notes
 
-On Fedora 43 with PlayBridge CLI 0.2.0, the stock receiver dashboard was observed consuming roughly one CPU core. `strace` showed repeated terminal redraw activity from the receiver process, including repeated `/dev/tty` size checks and writes of terminal escape sequences. The headless route removes that dashboard loop rather than trying to hide it behind a pseudo-terminal.
+See [`ENGINEERING.md`](ENGINEERING.md) for the investigation, observations, design constraints, failure modes, and reproducibility notes.
 
-## Upstream
+The project is useful as a case study in:
 
-This is a downstream patch for [PlayBridge](https://github.com/playbridgeapp/playbridge). PlayBridge's CLI is Rust-based and its current CLI manifest identifies version 0.2.0; the receiver runtime is implemented in `cli/src/receive.rs`.
+- profiling an unfamiliar binary from the outside;
+- using `ps`, `top -H`, and `strace` to move from symptom to mechanism;
+- reading a Rust CLI's command dispatch and runtime boundaries;
+- making a narrow downstream patch instead of forking an entire application;
+- separating UI concerns from a reusable runtime;
+- pinning upstream revisions for reproducible builds;
+- documenting operational deployment with systemd.
 
-PlayBridge is licensed upstream under AGPL-3.0-or-later. This repository contains only the downstream patch, build tooling, service example, and investigation notes; it does not redistribute the upstream source tree.
+## Upstream relationship
+
+This project targets the upstream PlayBridge project and keeps the downstream patch separate from the upstream source tree. The repository does not redistribute the upstream source tree.
+
+PlayBridge is licensed upstream under AGPL-3.0-or-later. Consult the upstream project for its complete licensing and attribution terms.
 
 ## Status
 
-Experimental downstream patch. The goal is a minimal, maintainable change that can eventually be proposed upstream rather than becoming a permanently separate receiver implementation.
+**Experimental / portfolio engineering project.**
+
+The goal is a clear demonstration of systems investigation and minimal-change design, with enough tooling and documentation that another engineer can understand what was changed and why.
