@@ -1,0 +1,49 @@
+diff --git a/cli/src/main.rs b/cli/src/main.rs
+index c22abcaf5e6f92376196b75deb77aac07792af3b..0000000000000000000000000000000000000000 100644
+--- a/cli/src/main.rs
++++ b/cli/src/main.rs
+@@ -76,12 +76,21 @@ async fn run(arguments: Vec<String>) -> Result<(), String> {
+         "receiver" | "receive" => {
+             if arguments[1..]
+                 .iter()
+                 .any(|value| value == "--help" || value == "-h")
+             {
+                 println!("{}", usage());
+                 return Ok(());
+             }
++            let headless = arguments[1..].iter().any(|value| value == "--headless");
++            let receiver_arguments = arguments[1..]
++                .iter()
++                .filter(|value| value.as_str() != "--headless")
++                .cloned()
++                .collect::<Vec<_>>();
++            if headless {
++                return receive::run_receiver_mode(&receiver_arguments, None).await;
++            }
+             run_dashboard(
+                 globals.theme.as_deref(),
+                 ui::DashboardLaunch::Receiver {
+-                    arguments: arguments[1..].to_vec(),
++                    arguments: receiver_arguments,
+                     auto_start: true,
+                 },
+             )
+@@ -348,6 +357,7 @@ Machine Commands:
+   send|cast <filename|URL>          Open Cast with a source preselected
+   receiver [options]                Open Receiver and start the local mpv receiver
++                                  Add --headless to run receiver without the dashboard
+   discover [options]                Open Discover for human-readable scans
+   browser <filename|URL>            Host and pair a browser receiver in Cast
+   preferred                         Open Settings for the preferred receiver
+*** a/cli/src/receive.rs
+--- b/cli/src/receive.rs
+@@ -249,7 +249,7 @@ pub(crate) async fn run_receiver_dashboard(
+     run_receiver_mode(&arguments, Some((commands, events))).await
+ }
+ 
+-async fn run_receiver_mode(
++pub(crate) async fn run_receiver_mode(
+     arguments: &[String],
+     mut dashboard: Option<(
+         tokio::sync::mpsc::Receiver<ReceiverDashboardCommand>,
+***
