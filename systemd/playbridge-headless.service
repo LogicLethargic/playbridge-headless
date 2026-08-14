@@ -1,0 +1,15 @@
+[Unit]
+Description=PlayBridge headless receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change this to the absolute path of the built binary.
+ExecStart=%h/.local/bin/playbridge receiver --headless
+Restart=on-failure
+RestartSec=2
+Environment=PLAYBRIDGE_NO_UPDATE_CHECK=1
+
+[Install]
+WantedBy=default.target
